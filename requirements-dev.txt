@@ -1,0 +1,6 @@
+-r requirements.txt
+
+pytest>=8.0
+
+# Только для examples/flask_adapter.py — справочного HTTP-адаптера.
+flask>=3.0

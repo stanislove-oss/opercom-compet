@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Credentials оффлайн-базы.
+.env
+
+# Результаты прогонов и локальные снимки данных.
+runs/
+dummy_df/
+main_2_filled.pptx
+baseline_dataframes.pkl
+
+# Временные файлы Office.
+~$*
