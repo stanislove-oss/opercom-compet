@@ -947,6 +947,97 @@ def _chart_has_avg_duration_series(chart):
         return False
 
 
+# Теги плотов (групп серий) внутри c:plotArea.
+_CHART_PLOT_TAGS = (
+    "barChart", "bar3DChart", "lineChart", "line3DChart",
+    "areaChart", "area3DChart", "scatterChart", "radarChart",
+    "bubbleChart", "stockChart", "surfaceChart", "surface3DChart",
+    "pieChart", "pie3DChart", "doughnutChart", "ofPieChart",
+)
+
+
+def _iter_chart_plot_elements(chart):
+    """Возвращает элементы плотов (barChart/lineChart/...) из c:plotArea графика."""
+    plot_area = chart._chartSpace.find('.//c:plotArea', NS)
+
+    if plot_area is None:
+        return []
+
+    return [
+        child for child in plot_area
+        if etree.QName(child).localname in _CHART_PLOT_TAGS
+    ]
+
+
+def _plot_series_names(plot_element):
+    """Имена серий одного плота в порядке их следования в XML."""
+    names = []
+
+    for ser in plot_element.findall('c:ser', NS):
+        value = ser.find('c:tx//c:v', NS)
+        names.append(value.text if value is not None and value.text is not None else "")
+
+    return names
+
+
+def _axis_element_id(axis_element):
+    ax_id = axis_element.find('c:axId', NS)
+    return ax_id.get('val') if ax_id is not None else None
+
+
+def get_avg_duration_axis_ids(chart):
+    """
+    Возвращает axId осей, к которым привязан служебный плот Ср.Хроно.
+
+    Duration-графики слайдов 13-14 — комбинированные: серии длительностей
+    (5/10/15/20/25/''/50) лежат в основном percentStacked-плоте, а Ср.Хроно —
+    в отдельном плоте со своей вторичной осью значений. В шаблоне у этой оси
+    намеренно «странный» масштаб (min=-10, max=20). Именно он превращает
+    100%-столбец Ср.Хроно в узкую красную капсулу ВНУТРИ столбца.
+
+    Если переписать вторичную ось на 0..1 (как для обычного 100%-stacked),
+    служебная серия растягивается на всю высоту столбца: вместо нужной части
+    столбца подсвечивается столбец целиком. Поэтому такие оси мы не трогаем.
+    """
+    axis_ids = set()
+
+    for plot_element in _iter_chart_plot_elements(chart):
+        series_names = _plot_series_names(plot_element)
+
+        if not series_names:
+            continue
+
+        if not all(_is_avg_duration_series(name) for name in series_names):
+            continue
+
+        for ax_id in plot_element.findall('c:axId', NS):
+            value = ax_id.get('val')
+            if value is not None:
+                axis_ids.add(value)
+
+    return axis_ids
+
+
+def get_chart_target_value_axes(chart):
+    """
+    Оси значений, которыми управляет наш код.
+
+    Из общего списка c:valAx исключаем оси служебного плота Ср.Хроно —
+    их масштаб приходит из шаблона и является частью дизайна графика.
+    """
+    all_value_axes = list(chart._chartSpace.valAx_lst)
+    protected_axis_ids = get_avg_duration_axis_ids(chart)
+
+    target_axes = [
+        axis_element for axis_element in all_value_axes
+        if _axis_element_id(axis_element) not in protected_axis_ids
+    ]
+
+    # Если защищены вообще все оси — работаем как раньше, чтобы не потерять
+    # настройку графиков с нестандартной структурой.
+    return target_axes or all_value_axes
+
+
 def _is_helper_chart_series(series_name):
     normalized = _normalize_series_name(series_name)
     return (
@@ -1310,6 +1401,99 @@ def make_series_invisible(series):
         pass
 
 
+# Цвет капсулы Ср.Хроно из шаблона (#FF0000).
+AVG_DURATION_MARKER_COLOR = (255, 0, 0)
+AVG_DURATION_MARKER_LINE_PT = 2.25
+
+
+def resolve_avg_duration_marker_color(color_dict):
+    """
+    Ищет цвет Ср.Хроно в color_dict ('Ср. хроно', 'Ср.Хроно', 'avg_duration' ...).
+
+    Если ничего не нашли — красный, как в шаблоне.
+    """
+    if color_dict:
+        for key, value in color_dict.items():
+            if _is_avg_duration_series(key):
+                rgb = _coerce_rgb_tuple(value)
+                if rgb is not None:
+                    return rgb
+
+    return AVG_DURATION_MARKER_COLOR
+
+
+def _coerce_rgb_tuple(value):
+    """(255, 0, 0) / '#FF0000' / 'FF0000' -> (255, 0, 0). Иначе None."""
+    if isinstance(value, (tuple, list)) and len(value) == 3:
+        try:
+            return tuple(int(component) for component in value)
+        except (TypeError, ValueError):
+            return None
+
+    text = str(value).strip().lstrip('#')
+
+    if len(text) != 6:
+        return None
+
+    try:
+        return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def style_avg_duration_marker(
+    series,
+    line_color=AVG_DURATION_MARKER_COLOR,
+    line_width_pt=AVG_DURATION_MARKER_LINE_PT,
+):
+    """
+    Возвращает серии Ср.Хроно вид из шаблона: без заливки, с цветной рамкой.
+
+    Это та самая «капсула», которая подсвечивает нужную часть столбца
+    (см. get_avg_duration_axis_ids). Полностью скрывать серию нельзя —
+    тогда подсветки не будет вовсе, а если при этом ещё и сбить масштаб
+    вторичной оси, рамка растянется на весь столбец.
+    """
+    ns_c = 'http://schemas.openxmlformats.org/drawingml/2006/chart'
+    ns_a = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+
+    try:
+        ser = series._element
+        spPr = ser.find(f'{{{ns_c}}}spPr')
+
+        if spPr is None:
+            spPr = etree.Element(f'{{{ns_c}}}spPr')
+            _insert_element_in_order(ser, spPr, _SER_CHILD_ORDER)
+
+        # Заливки быть не должно: капсула только обводит значение.
+        _remove_children_by_local_names(
+            spPr,
+            {'noFill', 'solidFill', 'gradFill', 'pattFill', 'blipFill'}
+        )
+        no_fill = etree.Element(f'{{{ns_a}}}noFill')
+        _insert_element_in_order(spPr, no_fill, _SPPR_CHILD_ORDER)
+
+        ln = spPr.find(f'{{{ns_a}}}ln')
+
+        if ln is None:
+            ln = etree.Element(f'{{{ns_a}}}ln')
+            _insert_element_in_order(spPr, ln, _SPPR_CHILD_ORDER)
+
+        _remove_children_by_local_names(
+            ln,
+            {'noFill', 'solidFill', 'gradFill', 'pattFill', 'blipFill'}
+        )
+        solid_fill = etree.Element(f'{{{ns_a}}}solidFill')
+        srgb_clr = etree.SubElement(solid_fill, f'{{{ns_a}}}srgbClr')
+        srgb_clr.set('val', '%02X%02X%02X' % tuple(int(c) for c in line_color))
+        _insert_element_in_order(ln, solid_fill, _LN_CHILD_ORDER)
+
+        ln.set('w', str(int(round(float(line_width_pt) * 12700))))
+        ln.set('cap', 'rnd')
+    except Exception:
+        pass
+
+
 def set_data_labels_as_values(data_labels, number_format="#,##0"):
     """
     Обычные графики: показываем значения из chart data.
@@ -1624,10 +1808,20 @@ def update_chart_data(
                 hide_legend_entries_by_series_names(chart, ["", "separator", "разделитель", "total", "итого", "всего"])
 
                 # Настройки для диаграмм с осями (не PIE/DOUGHNUT)
-                if not is_pie_or_doughnut:
+                # Оси служебного плота Ср.Хроно исключаем: их масштаб из шаблона
+                # держит капсулу Ср.Хроно узкой полосой внутри столбца.
+                target_value_axes = (
+                    [] if is_pie_or_doughnut else get_chart_target_value_axes(chart)
+                )
+
+                if not is_pie_or_doughnut and target_value_axes:
                     try:
-                        value_axis = chart.value_axis
-                        
+                        # python-pptx для комбо-графиков берёт valAx_lst[1];
+                        # повторяем это поведение, но уже среди «своих» осей.
+                        value_axis = ValueAxis(
+                            target_value_axes[1 if len(target_value_axes) > 1 else 0]
+                        )
+
                         # Для 100%-stacked ось всегда 0..100%.
                         # custom_y_axis_max для такого графика игнорируем.
                         if is_100_percent_chart:
@@ -1724,7 +1918,7 @@ def update_chart_data(
                         except Exception:
                             resolved_major_unit = None
 
-                        for _valAx in list(chart._chartSpace.valAx_lst):
+                        for _valAx in target_value_axes:
                             try:
                                 extra_axis = ValueAxis(_valAx)
                                 extra_axis.maximum_scale = y_axis_max
@@ -1835,14 +2029,16 @@ def update_chart_data(
                         data_labels.font.size = Pt(size_label)
                         data_labels.font.bold = False
 
-                        # Ср.Хроно — служебная серия комбинированных duration-графиков.
-                        # Данные в Excel оставляем, подписи показываем числом,
-                        # но сам столбец/линия делаем невидимым, чтобы окрашивались именно
-                        # серии длительностей 5/10/15/20/25/50.
+                        # Ср.Хроно — служебная серия комбинированных duration-графиков
+                        # (слайды 13-14). В шаблоне это красная капсула вокруг значения
+                        # среднего хронометража: она подсвечивает нужную часть столбца.
+                        # Заливки у неё нет, поэтому цвета остаются за сериями длительностей
+                        # 5/10/15/20/25/50, а масштаб её вторичной оси мы не переписываем
+                        # (см. get_avg_duration_axis_ids) — иначе капсула растянется
+                        # на весь столбец.
                         if _is_avg_duration_series(series.name):
-                            # Ср.Хроно — служебная серия второго plot.
-                            # Подписи оставляем числом, но саму серию делаем невидимой,
-                            # чтобы цвета применялись только к сериям секунд.
+                            marker_color = resolve_avg_duration_marker_color(color_dict)
+
                             set_data_labels_as_values(data_labels, number_format="0.0")
                             configure_data_labels_no_wrap(data_labels)
 
@@ -1852,11 +2048,11 @@ def update_chart_data(
                                 pass
 
                             try:
-                                data_labels.font.color.rgb = RGBColor(0, 0, 0)
+                                data_labels.font.color.rgb = RGBColor(*marker_color)
                             except Exception:
                                 pass
 
-                            make_series_invisible(series)
+                            style_avg_duration_marker(series, line_color=marker_color)
                             continue
 
                         if is_100_percent_chart or stacked_value_labels_as_percent:
