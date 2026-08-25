@@ -22,8 +22,8 @@ MIN_PYTHON = (3, 12)
 #: Пакеты, без которых ноутбук не стартует.
 REQUIRED_PACKAGES = ["pandas", "pptx", "lxml", "openpyxl", "numpy", "dotenv"]
 
-#: Переменные окружения для подключения к оффлайн-базе (ячейка 1 ноутбука).
-DB_ENV_VARS = ["HOST", "USER", "PASSWORD", "DB_NAME"]
+#: Клиент под каждый движок базы. Ставится только нужный.
+DB_CLIENT_PACKAGES = {"clickhouse": "clickhouse_connect", "mssql": "pyodbc"}
 
 
 @dataclass
@@ -70,34 +70,80 @@ def _check_packages() -> list[Check]:
     return checks
 
 
-def _check_app_package() -> Check:
-    """Пакет `app` с подключением к БД и SQL-запросами.
+def _db_engine() -> str:
+    """Какой движок базы выбран. Читается тем же кодом, что и подключение."""
+    from functions.db import _env, load_env_file
 
-    Его нет в репозитории намеренно: он содержит внутренние SQL-запросы и живёт
-    в отдельном пакете компании. Без него вариант источника "db" не поедет.
-    """
-    found = importlib.util.find_spec("app") is not None
+    load_env_file()
+    engine = (_env("DB_ENGINE", default="clickhouse") or "clickhouse").strip().lower()
+    return "mssql" if engine in ("mssql", "sqlserver", "mysql") else "clickhouse"
+
+
+def _check_db_client(engine: str) -> Check:
+    """Драйвер под выбранный движок."""
+    package = DB_CLIENT_PACKAGES[engine]
+    found = importlib.util.find_spec(package) is not None
+    hint = (
+        "pip install clickhouse-connect" if engine == "clickhouse" else "pip install pyodbc"
+    )
     return Check(
-        name="Пакет app (MySQL + SQL-запросы)",
+        name=f"Драйвер базы ({package})",
         ok=found,
         blocking=True,
-        detail=(
-            "доступен"
-            if found
-            else "не найден: ноутбук импортирует app.sql_oop.MySQL и app.sql_dict_connection. "
-            "Положи пакет рядом с проектом или установи его в окружение"
+        detail="установлен" if found else f"не установлен: {hint}",
+    )
+
+
+def _check_db_settings(engine: str) -> list[Check]:
+    """Что видно в окружении для подключения — без паролей."""
+    from functions.db import describe_environment
+
+    if engine == "mssql":
+        from functions.db import _env
+
+        missing = [
+            name
+            for name, value in (
+                ("host", _env("MSSQL_HOST", "SQL_SERVER", "HOST")),
+                ("user", _env("MSSQL_USER", "SQL_USERNAME", "DB_USER", "USER")),
+                ("database", _env("MSSQL_DATABASE", "SQL_DATABASE", "DB_NAME")),
+            )
+            if not value
+        ]
+        return [
+            Check(
+                name="Настройки SQL Server",
+                ok=not missing,
+                blocking=True,
+                detail="заданы" if not missing else f"не заданы в .env: {', '.join(missing)}",
+            )
+        ]
+
+    report = describe_environment()
+    host = report.get("CLICKHOUSE_HOST")
+    checks = [
+        Check(
+            name="Адрес ClickHouse",
+            ok=bool(host),
+            blocking=True,
+            detail=(
+                f"{host}:{report.get('CLICKHOUSE_PORT')}, база {report.get('CLICKHOUSE_DATABASE')}"
+                if host
+                else "не задан CLICKHOUSE_HOST — заполни .env (cp .env.example .env)"
+            ),
         ),
-    )
+        Check(
+            name="Пароль ClickHouse",
+            ok=bool(report.get("пароль задан")),
+            blocking=False,
+            detail="задан" if report.get("пароль задан") else "не задан — если база без пароля, это нормально",
+        ),
+    ]
 
+    for warning in report.get("предупреждения", []):
+        checks.append(Check(name="Окружение базы", ok=False, blocking=False, detail=warning))
 
-def _check_db_env() -> Check:
-    missing = [name for name in DB_ENV_VARS if not os.getenv(name)]
-    return Check(
-        name="Credentials оффлайн-базы",
-        ok=not missing,
-        blocking=True,
-        detail="заданы" if not missing else f"не заданы в .env: {', '.join(missing)}",
-    )
+    return checks
 
 
 def _check_path(name: str, path: str | Path, *, blocking: bool, must_be_dir: bool) -> Check:
@@ -142,8 +188,17 @@ def run_checks(settings: Settings) -> list[Check]:
     )
 
     if settings.data_source == "db":
-        checks.append(_check_app_package())
-        checks.append(_check_db_env())
+        engine = _db_engine()
+        checks.append(
+            Check(
+                name="Движок базы (DB_ENGINE)",
+                ok=True,
+                blocking=False,
+                detail=f"{engine}" + (" — прежняя база, для сверки и отката" if engine == "mssql" else ""),
+            )
+        )
+        checks.append(_check_db_client(engine))
+        checks.extend(_check_db_settings(engine))
     else:
         checks.append(
             _check_path("Снимки данных (dummy_df)", settings.dummy_df_root, blocking=True, must_be_dir=True)

@@ -4,3 +4,7 @@ pytest>=8.0
 
 # Только для examples/flask_adapter.py — справочного HTTP-адаптера.
 flask>=3.0
+
+# Встроенный ClickHouse: scripts/verify_queries.py прогоняет запросы проекта
+# на настоящем движке по снятой схеме, сервер для этого не нужен.
+chdb>=3.0

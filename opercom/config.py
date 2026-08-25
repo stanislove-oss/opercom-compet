@@ -13,8 +13,30 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-DEFAULT_TEMPLATE = PROJECT_ROOT / "templates_pptx" / "Х5_Оперком_март_v3_fin_named.pptx"
 DEFAULT_NOTEBOOK = PROJECT_ROOT / "main_2.ipynb"
+
+TEMPLATES_DIR = PROJECT_ROOT / "templates_pptx"
+
+
+def _default_template() -> Path:
+    """Шаблон презентации: точное имя, иначе единственный *_named.pptx рядом.
+
+    Имя файла начинается с буквы «Х», и она бывает как кириллической, так и
+    латинской «X» — на вид не отличить, а путь при этом не совпадает. Чтобы
+    сборка не падала из-за омоглифа, точное имя — лишь первая попытка.
+    """
+    exact = TEMPLATES_DIR / "Х5_Оперком_март_v3_fin_named.pptx"
+    if exact.is_file():
+        return exact
+
+    candidates = sorted(
+        path for path in TEMPLATES_DIR.glob("*_named.pptx")
+        if not path.name.startswith("~$")
+    )
+    return candidates[0] if candidates else exact
+
+
+DEFAULT_TEMPLATE = _default_template()
 
 # Пути из ноутбука (ячейка 39). На Linux-хосте это должны быть точки монтирования
 # той же самой сетевой шары.
