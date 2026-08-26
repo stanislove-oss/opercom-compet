@@ -88,6 +88,31 @@ BIG_TV_TABLE = _env("BIG_TV_TABLE", "big_tv")
 #: Региональное ТВ. Прежняя reg_tv_simple.
 REG_TV_TABLE = _env("REG_TV_TABLE", "reg_tv")
 
+#: Диджитал. Лежит в соседней базе, поэтому имя пишется вместе с ней:
+#: подключение идёт к своей базе, а читаем из чужой. Прежде эти данные
+#: приходили Excel-файлом с сетевой шары.
+#:
+#: Точное имя таблицы стоит подтвердить — схема этой базы не снята:
+#:     python scripts/dump_schema.py --database other_media_x5_v1
+#:     python scripts/dump_schema.py --find digital
+DIGITAL_TABLE = _env("DIGITAL_TABLE", "other_media_x5_v1.digital_investments")
+
+#: Колонка с затратами. Колонки cost_rub_disc в таблице нет, вместо неё две:
+#: cost_estimated и cost_NOT_FOR_USE. Берём первую — вторая названа так, что
+#: использовать её явно не предполагается. Это же совпадает с прежним
+#: Excel-файлом, где отчёт брал cost_estimated.
+DIGITAL_COST_COLUMN = _env("DIGITAL_COST_COLUMN", "cost_estimated")
+
+#: Рекламодатель. В таблице колонка называется короче, чем ждёт отчёт, —
+#: ровно так же было и в Excel, где ноутбук делал rename.
+DIGITAL_ADVERTISER_COLUMN = _env("DIGITAL_ADVERTISER_COLUMN", "advertiser")
+
+#: Дополнительный фильтр, если понадобится. В таблице есть признак
+#: paid_marketing_channels (0/1) и колонка coef — что они значат, пока
+#: неизвестно, поэтому ничего не фильтруем и ни на что не умножаем:
+#: переезд не должен менять цифры сам по себе.
+DIGITAL_FILTER = _env("DIGITAL_FILTER", "")
+
 #: Коды медиа в media_costs_union.media_type. Проверено в соседнем проекте
 #: на этой же базе: TV, OD, RA, PR — других значений в таблице нет.
 COST_MEDIA_TYPES = {"tv": "TV", "radio": "RA", "outdoor": "OD", "press": "PR"}
@@ -131,16 +156,23 @@ NAMED_DICTIONARY_COLUMNS = (
     ("lowerUTF8(advertiser_type)", "advertiser_type"),
 )
 
-#: Поля справочника, лежащие под category_N. Соответствие снято с определений
-#: представлений в соседнем проекте на этой же базе и подтверждено значениями:
-#:     category_4 -> YES / NO                    (retail_category)
-#:     category_7 -> ЦЕНОВОЕ ПРОМО / СТМ / …     (message_type)
-#:     category_5 -> ОФФЛАЙН / ДОСТАВКА / …      (delivery)
+#: Поля справочника, лежащие под category_N. Всё соответствие снято с текста
+#: представлений (scripts/check_categories.py), где колонки уже переименованы,
+#: — а не подобрано по значениям. Значения тут ничего не доказывают:
+#: retail_category и competitor оба принимают только YES/NO и по набору
+#: значений неразличимы.
 #:
-#: competitor так не проверялся: в чижике это поле не использовалось. Номер
-#: колонки задаётся настройкой, чтобы подставить его без правки кода:
-#:     COMPETITOR_COLUMN=category_3
-#: Найти номер:  python scripts/check_categories.py
+#: competitor -> category_1: прочитано из определения big_tv_weekly_view
+#: скриптом scripts/check_categories.py. Это не догадка по значениям —
+#: в тексте представления буквально написано `category_1 AS competitor`.
+#: Догадка бы и не сработала: competitor и retail_category оба принимают
+#: только YES/NO, и по набору значений они неразличимы.
+#:
+#: Оттуда же остальные, включая те, что отчёт не читает:
+#:     category_1 -> competitor         category_5 -> delivery
+#:     category_2 -> category           category_6 -> product_type
+#:     category_4 -> retail_category    category_7 -> message_type
+#:                                      category_8 -> loyalty_category
 #:
 #: lowerUTF8 обязателен: в базе значения прописными, а отчёт сравнивает
 #: со строчными — иначе не найдётся ни одной строки, и отчёт получится
@@ -149,7 +181,7 @@ CATEGORY_COLUMNS = {
     "retail_category": _env("RETAIL_CATEGORY_COLUMN", "category_4"),
     "message_type": _env("MESSAGE_TYPE_COLUMN", "category_7"),
     "delivery": _env("DELIVERY_COLUMN", "category_5"),
-    "competitor": _env("COMPETITOR_COLUMN", ""),
+    "competitor": _env("COMPETITOR_COLUMN", "category_1"),
 }
 
 #: Чего в базе нет вовсе — ни колонкой, ни в представлениях: include_exclude.
@@ -562,3 +594,45 @@ OPERCOM_TV_RATE_REG = _rate_query(
         (f"`StandRtgPer_{AUDIENCE}`", "st_tvr"),
     ],
 )
+
+
+# ---------------------------------------------------------------------------
+# Диджитал
+# ---------------------------------------------------------------------------
+# Раньше приходил Excel-файлом с сетевой шары, теперь лежит в соседней базе.
+# Берём только то, что отчёту действительно нужно: бренд, рекламодателя,
+# delivery, период и деньги. Прежний Excel тащил ещё site, marketing_channel,
+# quarter и прочее — ноутбук их не читает, а каждая лишняя колонка это лишний
+# шанс не совпасть с названием в базе.
+#
+# Суммируем сразу в базе: ноутбук всё равно первым делом группирует диджитал
+# по бренду, delivery, году и месяцу — итог тот же, данных по сети меньше.
+#
+# Колонки через псевдоним d.: если написать ifNull(delivery, '') AS delivery
+# без него, ClickHouse может принять имя внутри ifNull за свой же псевдоним
+# и ответить «Unknown expression identifier».
+#
+# ifNull на delivery — не украшательство: ноутбук группирует по этой колонке,
+# а groupby в pandas выбрасывает строки с NaN в ключе. Один NULL в базе —
+# и часть диджитала молча пропадёт из отчёта.
+#
+# date здесь не собирается намеренно: ноутбук строит его из year и month
+# ровно так же, как строил для Excel. Меньше расхождений при сверке.
+
+DIGITAL_SQL = f'''
+SELECT
+    lowerUTF8(d.brand_main) AS brand_main,
+    lowerUTF8(ifNull(d.{DIGITAL_ADVERTISER_COLUMN}, '')) AS advertiser_main,
+    lowerUTF8(ifNull(d.delivery, '')) AS delivery,
+    d.year AS year,
+    d.month AS month,
+    SUM(d.{DIGITAL_COST_COLUMN}) AS cost_rub_disc
+FROM {DIGITAL_TABLE} AS d
+WHERE {_and(f"d.year >= {PERIOD_FROM[:4]}", DIGITAL_FILTER and f"d.{DIGITAL_FILTER}")}
+GROUP BY
+    brand_main,
+    advertiser_main,
+    delivery,
+    year,
+    month
+'''

@@ -44,9 +44,20 @@ def _names(module):
 # --- наборы запросов --------------------------------------------------------
 
 
-def test_both_query_sets_cover_the_same_names():
-    """Переключение движка не должно терять запрос: имена обязаны совпадать."""
-    assert _names(ch) == _names(ms) == EXPECTED_QUERIES
+def test_both_query_sets_cover_the_core_queries():
+    """Переключение движка не должно терять запрос, который есть в обоих."""
+    assert EXPECTED_QUERIES <= _names(ch)
+    assert EXPECTED_QUERIES <= _names(ms)
+
+
+def test_digital_exists_only_for_clickhouse():
+    """Диджитал переехал в базу; в SQL Server его не было — он приходил Excel'ем.
+
+    Ноутбук проверяет наличие запроса по Q.names и на mssql уходит в Excel,
+    поэтому лишний запрос в одном наборе ничего не ломает.
+    """
+    assert "DIGITAL_SQL" in _names(ch)
+    assert "DIGITAL_SQL" not in _names(ms)
 
 
 def test_queries_for_picks_the_matching_module():
@@ -267,15 +278,24 @@ def test_sheet_mode_puts_no_classification_in_the_query(monkeypatch):
         importlib.reload(ch)
 
 
-def test_unresolved_filters_are_reported_not_silently_skipped():
-    """competitor и include_exclude пока не сопоставлены — это должно быть видно."""
-    missing = ch.unresolved_filters()
-    assert "competitor" in missing
-    assert "include_exclude" in missing
+def test_competitor_is_resolved_from_the_view_definition():
+    """category_1 прочитан из текста big_tv_weekly_view, а не угадан по значениям.
+
+    Угадать было нельзя: competitor и retail_category оба принимают только
+    YES/NO, и по набору значений они неразличимы.
+    """
+    assert ch.CATEGORY_COLUMNS["competitor"] == "category_1"
+    assert "lowerUTF8(category_1) AS competitor" in ch.TV_SQL
+    assert "competitor" not in ch.unresolved_filters()
+
+
+def test_include_exclude_is_still_reported_as_missing():
+    """Его в базе нет вовсе — и это должно быть видно, а не молча пропущено."""
+    assert ch.unresolved_filters() == ("include_exclude",)
 
     report = ch.describe_classification()
     assert "ФИЛЬТРЫ БЕЗ КОЛОНКИ" in report
-    assert "check_categories.py" in report
+    assert "cleaning_flag" in report
 
 
 def test_resolving_the_columns_clears_the_warning(monkeypatch):

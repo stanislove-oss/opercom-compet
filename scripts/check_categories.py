@@ -69,6 +69,20 @@ def columns_sql():
             "WHERE database = {db:String} AND table = {tbl:String} ORDER BY position")
 
 
+def split_table(table, default_database):
+    """Разбирает `база.таблица` на пару.
+
+    В system.columns база и таблица — разные поля, и полное имя целиком там
+    не встречается никогда. Если передать его как имя таблицы, запрос вернёт
+    ноль колонок и всё выглядит так, будто в таблице нет ни одного нужного
+    поля, — хотя на самом деле её просто не искали.
+    """
+    if "." in table:
+        database, _, name = table.partition(".")
+        return database, name
+    return default_database, table
+
+
 def mapping_from_views(db, database):
     """Соответствие category_N -> осмысленное имя, из определений представлений."""
     views = [row["name"] for row in db.fetch_all(views_sql(database), {"db": database})]
@@ -132,8 +146,14 @@ def main():
 
         print("=== Поля справочника в колонках базы ===")
         by_alias = {alias: (column, view) for column, (alias, view) in mapping.items()}
+        table_database, table_only = split_table(args.table, database)
         table_columns = {row["name"] for row in
-                         db.fetch_all(columns_sql(), {"db": database, "tbl": args.table})}
+                         db.fetch_all(columns_sql(),
+                                      {"db": table_database, "tbl": table_only})}
+        if not table_columns:
+            print(f"  ВНИМАНИЕ: у {args.table} не нашлось ни одной колонки —"
+                  f" проверь имя базы и таблицы,\n"
+                  f"  иначе всё ниже будет выглядеть как «поля нет».\n")
 
         for name in WANTED:
             if name in table_columns:

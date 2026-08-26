@@ -276,7 +276,10 @@ def main():
 
     failures, skipped = [], []
     for name, sql in queries.items():
-        if table_names(sql) & set(absent):
+        # absent хранит имена так, как они написаны в запросе (иногда с базой),
+        # а table_names отдаёт только имя таблицы — сравниваем по обоим видам.
+        absent_names = set(absent) | {name.split(".")[-1] for name in absent}
+        if table_names(sql) & absent_names:
             skipped.append(name)
             print(f"  пропуск {name}  (таблицы нет в дампе)")
             continue
