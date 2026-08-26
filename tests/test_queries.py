@@ -141,11 +141,38 @@ def test_join_key_comes_from_the_database():
         assert ch.KEY_COLUMN in getattr(ch, name), f"{name}: нет {ch.KEY_COLUMN}"
 
 
-def test_estat_filter_only_where_the_column_exists():
-    """Колонка estat есть только в media_costs_union, в таблицах ТВ её нет."""
-    assert "estat" in ch.TV_SQL
-    assert "estat" not in ch.OPERCOM_TV_RATE_NAT
-    assert "estat" not in ch.OPERCOM_TV_RATE_REG
+def test_no_filters_beyond_what_the_old_queries_had():
+    """Переезд не должен менять цифры сам по себе: лишних фильтров нет."""
+    assert ch.ESTAT_FILTER == ""
+    assert ch.CLEANING_FILTER == ""
+    for name in EXPECTED_QUERIES:
+        text = getattr(ch, name)
+        assert "estat" not in text, f"{name}: фильтр estat включён по умолчанию"
+        assert "cleaning_flag" not in text, f"{name}: фильтр cleaning_flag включён"
+
+
+def test_estat_filter_only_reaches_the_table_that_has_the_column(monkeypatch):
+    """Когда фильтр включают, он идёт только в затраты: в таблицах ТВ колонки нет."""
+    monkeypatch.setenv("ESTAT_FILTER", "estat = 'R'")
+    module = importlib.reload(ch)
+    try:
+        assert "mc.estat = 'R'" in module.TV_SQL
+        assert "estat" not in module.OPERCOM_TV_RATE_NAT
+        assert "estat" not in module.OPERCOM_TV_RATE_REG
+    finally:
+        monkeypatch.delenv("ESTAT_FILTER", raising=False)
+        importlib.reload(ch)
+
+
+def test_rate_queries_keep_media_type_detail_as_is():
+    """Прежние запросы рейтингов регистр этой колонки не трогали."""
+    for name in ("OPERCOM_TV_RATE_NAT", "OPERCOM_TV_RATE_REG"):
+        text = getattr(ch, name)
+        assert "lowerUTF8(media_type_detail)" not in text, name
+        assert "media_type_detail" in text, name
+
+    # А запросы затрат — приводили, и это тоже надо сохранить.
+    assert "lowerUTF8(media_type_detail)" in ch.TV_SQL
 
 
 @pytest.mark.parametrize("mode", ["off", "identical", "key"])
