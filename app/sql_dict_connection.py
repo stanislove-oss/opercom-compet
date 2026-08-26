@@ -185,21 +185,31 @@ CATEGORY_COLUMNS = {
 }
 
 #: include_exclude. В отчёте по нему стоял фильтр `== 'include'` — ручные
-#: исключения из Google-таблицы. Три варианта:
+#: исключения из Google-таблицы. Четыре варианта:
 #:
-#:     INCLUDE_EXCLUDE_VIA=cleaning_flag   чистка на стороне базы (по умолчанию)
-#:     INCLUDE_EXCLUDE_VIA=column          настоящая колонка, см. ниже
-#:     INCLUDE_EXCLUDE_VIA=                фильтра нет вовсе
+#:     upstream       чистка уже применена при наполнении таблиц (по умолчанию)
+#:     cleaning_flag  воспроизвести фильтр по cleaning_flag
+#:     column         настоящая колонка, имя в INCLUDE_EXCLUDE_COLUMN
+#:     none           фильтра нет, и это неразрешённый пробел
 #:
-#: ВАЖНО. В таблицах, которые читает отчёт (media_costs_union, nat_tv, big_tv,
-#: reg_tv), колонки include_exclude нет. Но она есть в соседней базе, в
-#: other_media_x5_v1.radio_dss_x5_v1 — то есть поле в хранилище живёт, просто
-#: не в наших таблицах. Схема mediascope_x5_big_v23 при этом ещё не снята,
-#: а затраты берутся именно оттуда. Прежде чем довольствоваться заменителем,
-#: имеет смысл посмотреть, нет ли там настоящей колонки:
-#:     python scripts/dump_schema.py --database mediascope_x5_big_v23
-#: Если найдётся — INCLUDE_EXCLUDE_VIA=column и INCLUDE_EXCLUDE_COLUMN=имя.
-INCLUDE_EXCLUDE_VIA = _env("INCLUDE_EXCLUDE_VIA", "cleaning_flag").strip().lower()
+#: РАЗНИЦА МЕЖДУ upstream И none ПРИНЦИПИАЛЬНА, хотя SQL у них одинаковый:
+#: в обоих случаях колонки в выгрузке не будет и ноутбук ничего не отфильтрует.
+#: Но upstream — это решение («строки уже вычищены, фильтровать нечего»),
+#: а none — это дыра («не знаем, чем заменить»). Первое проходит проверку
+#: готовности молча, второе её не проходит и не даёт собрать презентацию.
+#: Если бы состояние было одно, дыра со временем стала бы выглядеть нормой.
+#:
+#: Почему upstream по умолчанию: таблицы наполняются уже очищенными по
+#: include_exclude. Повторный фильтр на нашей стороне в лучшем случае
+#: не сделает ничего, в худшем — срежет строки второй раз по другому правилу.
+#:
+#: Проверяется тем же скриптом, которым меряются остальные фильтры:
+#:     python scripts/check_filters.py
+#: Если чистка действительно применена, cleaning_flag не отсечёт ничего.
+INCLUDE_EXCLUDE_VIA = _env("INCLUDE_EXCLUDE_VIA", "upstream").strip().lower()
+
+#: Состояния, в которых колонки в выгрузке нет, но это осознанно, а не пробел.
+INCLUDE_EXCLUDE_SETTLED = ("upstream",)
 
 #: Имя настоящей колонки, если она найдётся. Значения приводятся к нижнему
 #: регистру и передаются как есть: в базе пишут EXCLUDE, в справочнике писали
@@ -260,6 +270,9 @@ def unresolved_filters():
         return ()
 
     available = {alias for _, alias in dictionary_columns()}
+    if INCLUDE_EXCLUDE_VIA in INCLUDE_EXCLUDE_SETTLED:
+        # Фильтровать нечего: строки вычищены до того, как попали в таблицу.
+        available.add("include_exclude")
     return tuple(name for name in REPORT_FILTERS if name not in available)
 
 
@@ -272,10 +285,13 @@ def describe_classification():
     for alias, column in CATEGORY_COLUMNS.items():
         lines.append(f"  {alias:<16} -> {column or 'НЕ ЗАДАНО'}")
 
-    if INCLUDE_EXCLUDE_VIA == "cleaning_flag":
-        lines.append(f"  include_exclude   -> {CLEANING_FLAG_INCLUDE} (ДОГАДКА)")
+    if INCLUDE_EXCLUDE_VIA in INCLUDE_EXCLUDE_SETTLED:
+        lines.append("  include_exclude  -> чистка применена при наполнении таблиц,")
+        lines.append("                      фильтр на нашей стороне не нужен")
+    elif INCLUDE_EXCLUDE_VIA == "cleaning_flag":
+        lines.append(f"  include_exclude  -> {CLEANING_FLAG_INCLUDE} (ДОГАДКА)")
     elif INCLUDE_EXCLUDE_VIA == "column":
-        lines.append(f"  include_exclude   -> {INCLUDE_EXCLUDE_COLUMN}")
+        lines.append(f"  include_exclude  -> {INCLUDE_EXCLUDE_COLUMN}")
 
     missing = unresolved_filters()
     if missing:

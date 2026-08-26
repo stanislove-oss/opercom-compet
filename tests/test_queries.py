@@ -323,41 +323,75 @@ def test_resolving_the_columns_clears_the_warning(monkeypatch):
         importlib.reload(ch)
 
 
-def test_include_exclude_reaches_costs_and_ratings_alike():
+def test_include_exclude_reaches_costs_and_ratings_alike(monkeypatch):
     """Отбор одинаков для всех источников — иначе слайды считались бы по-разному."""
-    for name in EXPECTED_QUERIES:
-        assert "include_exclude" in getattr(ch, name), name
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "cleaning_flag")
+    module = importlib.reload(ch)
+    try:
+        for name in EXPECTED_QUERIES:
+            assert "include_exclude" in getattr(module, name), name
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
 
 
 # --- include_exclude: заменитель вместо настоящей колонки -------------------
 
 
-def test_include_exclude_uses_cleaning_flag_by_default():
-    """Колонки нет в наших таблицах, поэтому её заменяет чистка на стороне базы."""
-    assert ch.INCLUDE_EXCLUDE_VIA == "cleaning_flag"
+def test_include_exclude_is_not_filtered_again_by_default():
+    """Таблицы наполняются уже вычищенными — повторный фильтр только навредит."""
+    assert ch.INCLUDE_EXCLUDE_VIA == "upstream"
     assert ch.unresolved_filters() == ()
 
-    # Значения те же, что ждёт фильтр в ноутбуке: `== 'include'`.
-    assert f"if({ch.CLEANING_FLAG_INCLUDE}, 'include', '!exclude') AS include_exclude" in ch.TV_SQL
+    for name in EXPECTED_QUERIES:
+        text = getattr(ch, name)
+        assert "include_exclude" not in text, name
+        assert "cleaning_flag" not in text, name
+
+    assert "фильтр на нашей стороне не нужен" in ch.describe_classification()
 
 
-def test_the_guess_is_visible_not_silent():
-    """Заменитель — это догадка, и она не должна выглядеть решённым вопросом."""
-    report = ch.describe_classification()
-    assert "ДОГАДКА" in report
-    assert "не двоичный" in report
-    # Подсказка, где искать настоящую колонку.
-    assert "dump_schema.py --database mediascope_x5_big_v23" in report
+def test_settled_and_missing_are_different_states(monkeypatch):
+    """SQL у upstream и none одинаковый, а смысл противоположный.
+
+    upstream — решение «фильтровать нечего», none — дыра «не знаем чем».
+    Если бы состояние было одно, дыра со временем выглядела бы нормой.
+    """
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "none")
+    module = importlib.reload(ch)
+    try:
+        assert "include_exclude" not in module.TV_SQL       # SQL тот же...
+        assert module.unresolved_filters() == ("include_exclude",)   # ...а вывод другой
+        assert "ФИЛЬТРЫ БЕЗ КОЛОНКИ" in module.describe_classification()
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
+
+
+def test_cleaning_flag_guess_is_visible_when_chosen(monkeypatch):
+    """Заменитель остаётся доступным, но не должен выглядеть решённым вопросом."""
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "cleaning_flag")
+    module = importlib.reload(ch)
+    try:
+        assert f"if({module.CLEANING_FLAG_INCLUDE}, 'include', '!exclude') AS include_exclude" in module.TV_SQL
+        report = module.describe_classification()
+        assert "ДОГАДКА" in report
+        assert "не двоичный" in report
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
 
 
 def test_cleaning_flag_condition_is_configurable(monkeypatch):
     """Флаг не 0/1: в radio_dss_x5_v1 встречается 2, поэтому условие — настройка."""
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "cleaning_flag")
     monkeypatch.setenv("CLEANING_FLAG_INCLUDE", "cleaning_flag IN (1, 2)")
     module = importlib.reload(ch)
     try:
         assert "if(cleaning_flag IN (1, 2), 'include', '!exclude')" in module.TV_SQL
     finally:
         monkeypatch.delenv("CLEANING_FLAG_INCLUDE", raising=False)
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
         importlib.reload(ch)
 
 
@@ -373,20 +407,6 @@ def test_real_column_is_passed_through_without_invented_mapping(monkeypatch):
     try:
         assert "lowerUTF8(ifNull(include_exclude, '')) AS include_exclude" in module.TV_SQL
         assert "'!exclude'" not in module.TV_SQL
-    finally:
-        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
-        importlib.reload(ch)
-
-
-def test_filter_can_still_be_turned_off_entirely(monkeypatch):
-    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "")
-    module = importlib.reload(ch)
-    try:
-        # Пустое значение подхватывает умолчание, поэтому выключаем явным словом.
-        monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "none")
-        module = importlib.reload(ch)
-        assert "include_exclude" not in module.TV_SQL
-        assert module.unresolved_filters() == ("include_exclude",)
     finally:
         monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
         importlib.reload(ch)
