@@ -267,3 +267,91 @@ def test_real_notebook_has_exactly_one_parameters_cell():
 def test_real_notebook_parameters_cell_is_first():
     plan = list(describe_plan(REAL_NOTEBOOK))
     assert plan[0].tag == T.PARAMETERS, "ячейка параметров должна идти первой"
+
+
+# --- колбэк прогресса не должен попадать в собственный перехват вывода -------
+
+
+def test_printing_callback_does_not_recurse(tmp_path, capsys):
+    """Ровно тот случай, на котором падал CLI.
+
+    Пока идёт ячейка, sys.stdout подменён на перехватчик. Колбэк CLI печатает
+    каждую строку вывода — и без ограждения печать уходила обратно в
+    перехватчик: write -> колбэк -> print -> write -> ... RecursionError
+    на первой же строке, которую напечатала ячейка.
+    """
+    notebook = make_notebook(
+        [
+            (T.PARAMETERS, "pass"),
+            (T.RUN, "print('База: clickhouse')\nprint('  tv: строк 1216404')"),
+        ],
+        tmp_path / "nb.ipynb",
+    )
+
+    seen = []
+
+    def on_event(event):
+        if event["type"] == "output":
+            seen.append(event["text"])
+            print(f"      {event['text']}")      # как в scripts/build_presentation.py
+
+    result = run_notebook(notebook, on_event=on_event)
+
+    assert result.executed == 2
+    assert seen == ["База: clickhouse", "  tv: строк 1216404"]
+
+    printed = capsys.readouterr().out
+    assert "База: clickhouse" in printed
+    assert "тв: строк" not in printed  # ничего не задвоилось
+
+
+def test_callback_output_does_not_leak_back_as_events(tmp_path):
+    """То, что печатает сам колбэк, не должно возвращаться новым событием."""
+    notebook = make_notebook(
+        [(T.PARAMETERS, "pass"), (T.RUN, "print('одна строка')")],
+        tmp_path / "nb.ipynb",
+    )
+
+    outputs = []
+
+    def on_event(event):
+        if event["type"] == "output":
+            outputs.append(event["text"])
+            print("эхо от колбэка")
+
+    run_notebook(notebook, on_event=on_event)
+
+    assert outputs == ["одна строка"]
+
+
+def test_streams_are_restored_after_the_run(tmp_path):
+    """Ограждение подменяет потоки временно и обязано вернуть их на место."""
+    notebook = make_notebook(
+        [(T.PARAMETERS, "pass"), (T.RUN, "print('привет')")],
+        tmp_path / "nb.ipynb",
+    )
+
+    before_out, before_err = sys.stdout, sys.stderr
+    run_notebook(notebook, on_event=lambda event: print("."))
+
+    assert sys.stdout is before_out
+    assert sys.stderr is before_err
+
+
+def test_callback_failure_still_restores_streams(tmp_path):
+    """Даже если колбэк упал, подменённые потоки не должны остаться навсегда."""
+    notebook = make_notebook(
+        [(T.PARAMETERS, "pass"), (T.RUN, "print('привет')")],
+        tmp_path / "nb.ipynb",
+    )
+
+    before_out, before_err = sys.stdout, sys.stderr
+
+    def broken(event):
+        raise RuntimeError("колбэк сломан")
+
+    with pytest.raises(Exception):
+        run_notebook(notebook, on_event=broken)
+
+    assert sys.stdout is before_out
+    assert sys.stderr is before_err

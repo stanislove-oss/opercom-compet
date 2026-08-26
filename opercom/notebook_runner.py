@@ -63,6 +63,40 @@ class NotebookResult:
     stages: list[str] = field(default_factory=list)
 
 
+class _SafeEmit:
+    """Колбэк прогресса, огороженный от собственного перехвата вывода.
+
+    Пока исполняется ячейка, sys.stdout подменён на _StreamToEvents. Если
+    колбэк при этом сам что-нибудь печатает — а CLI ровно это и делает, —
+    получается замкнутая цепочка: печать ячейки -> write -> колбэк -> печать
+    -> write -> ... и RecursionError на первой же строке вывода.
+
+    Поэтому на время вызова колбэка настоящие потоки возвращаются на место.
+    `_busy` — второй рубеж на случай, если колбэк допишет что-то мимо: тогда
+    вложенное событие просто отбрасывается, а не уходит в рекурсию.
+    """
+
+    def __init__(self, emit: EventCallback):
+        self._emit = emit
+        self._busy = False
+        # Захватываем потоки ДО подмены — это и есть настоящая консоль.
+        self._real_stdout = sys.stdout
+        self._real_stderr = sys.stderr
+
+    def __call__(self, event: dict) -> None:
+        if self._busy:
+            return
+
+        self._busy = True
+        saved_stdout, saved_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = self._real_stdout, self._real_stderr
+        try:
+            self._emit(event)
+        finally:
+            sys.stdout, sys.stderr = saved_stdout, saved_stderr
+            self._busy = False
+
+
 class _StreamToEvents(io.TextIOBase):
     """Подменяет stdout/stderr ноутбука и превращает вывод в события построчно."""
 
@@ -177,7 +211,9 @@ def run_notebook(
         NotebookTimeout: превышено время.
     """
     notebook_path = Path(notebook_path)
-    emit: EventCallback = on_event or (lambda event: None)
+    # Все события идут через ограждение: колбэк вызывается с настоящими
+    # stdout/stderr, даже когда вывод ячейки перехвачен.
+    emit: EventCallback = _SafeEmit(on_event or (lambda event: None))
 
     notebook = load_notebook(notebook_path)
     cells = notebook["cells"]
