@@ -106,19 +106,127 @@ BIG_TV_FROM = "2025-01-01"
 
 
 # ---------------------------------------------------------------------------
-# Ключ к словарю чистки
+# Классификация: из базы, а не из Google-таблицы
 # ---------------------------------------------------------------------------
-# Классификация (brand_main, competitor, include_exclude, retail_category,
-# advertiser_type) по-прежнему приходит из Google-таблицы: отчёт фильтрует по
-# competitor и include_exclude, а таких колонок в базе нет. Поля brand_main,
-# advertiser_type, category_4/5/7 в таблицах есть — отказаться от справочника
-# можно, но это отдельная задача со сверкой цифр, см. README.
+# Раньше поля классификации приходили только из справочника, и выгрузка
+# мёржилась с ним по ключу. Теперь они есть в самих таблицах, и справочник
+# не нужен: DICTIONARY_SOURCE=clickhouse (по умолчанию) берёт их из базы.
 #
-# В базе появилась колонка media_key_id — готовый ключ вида `tv_1633629`,
-# он же есть в справочнике. Раньше ключ собирали руками из media_type и adId,
-# и собирали по-разному в разных местах ноутбука. Теперь он берётся из базы
-# как есть, а ноутбук только приводит его к нижнему регистру.
+# Часть полей лежит под осмысленными именами, часть — под category_N.
+# Осмысленных имён у вторых в таблицах нет, но есть в представлениях
+# (reg_tv_weekly_view и подобные): там те же колонки уже переименованы,
+# и соответствие читается из определения представления, а не угадывается:
+#
+#     python scripts/check_categories.py
+#     python scripts/check_categories.py --values     # ещё и значения колонок
 KEY_COLUMN = "media_key_id"
+
+DICTIONARY_SOURCE = _env("DICTIONARY_SOURCE", "clickhouse").strip().lower()
+DICTIONARY_FROM_DB = DICTIONARY_SOURCE != "sheet"
+
+#: Поля справочника, которые в таблицах лежат под своими именами.
+NAMED_DICTIONARY_COLUMNS = (
+    ("brand_main", "brand_main"),
+    ("lowerUTF8(advertiser_main)", "advertiser_main"),
+    ("lowerUTF8(advertiser_type)", "advertiser_type"),
+)
+
+#: Поля справочника, лежащие под category_N. Соответствие снято с определений
+#: представлений в соседнем проекте на этой же базе и подтверждено значениями:
+#:     category_4 -> YES / NO                    (retail_category)
+#:     category_7 -> ЦЕНОВОЕ ПРОМО / СТМ / …     (message_type)
+#:     category_5 -> ОФФЛАЙН / ДОСТАВКА / …      (delivery)
+#:
+#: competitor так не проверялся: в чижике это поле не использовалось. Номер
+#: колонки задаётся настройкой, чтобы подставить его без правки кода:
+#:     COMPETITOR_COLUMN=category_3
+#: Найти номер:  python scripts/check_categories.py
+#:
+#: lowerUTF8 обязателен: в базе значения прописными, а отчёт сравнивает
+#: со строчными — иначе не найдётся ни одной строки, и отчёт получится
+#: пустым, не упав.
+CATEGORY_COLUMNS = {
+    "retail_category": _env("RETAIL_CATEGORY_COLUMN", "category_4"),
+    "message_type": _env("MESSAGE_TYPE_COLUMN", "category_7"),
+    "delivery": _env("DELIVERY_COLUMN", "category_5"),
+    "competitor": _env("COMPETITOR_COLUMN", ""),
+}
+
+#: Чего в базе нет вовсе — ни колонкой, ни в представлениях: include_exclude.
+#: В отчёте по нему стоял фильтр `== 'include'` — ручные исключения из
+#: Google-таблицы. Заменить его нечем, кроме чистки на стороне базы:
+#:     INCLUDE_EXCLUDE_VIA=cleaning_flag   строки с cleaning_flag = 1 считаем include
+#:     INCLUDE_EXCLUDE_VIA=               (по умолчанию) фильтра нет вовсе
+#:
+#: Без фильтра суммы станут больше прежних — ровно на те строки, которые
+#: раньше вычёркивали руками. Насколько именно, покажет сверка:
+#:     python scripts/compare_engines.py --queries TV_SQL
+INCLUDE_EXCLUDE_VIA = _env("INCLUDE_EXCLUDE_VIA", "").strip().lower()
+
+
+def dictionary_columns():
+    """Пары (выражение, имя) с полями классификации — то, что раньше давал мёрж.
+
+    Список одинаков для затрат и для рейтингов: и brand_main, и category_N
+    лежат во всех четырёх таблицах.
+    """
+    if not DICTIONARY_FROM_DB:
+        return ()
+
+    columns = list(NAMED_DICTIONARY_COLUMNS)
+    for alias, column in CATEGORY_COLUMNS.items():
+        if column:
+            columns.append((f"lowerUTF8({column})", alias))
+
+    if INCLUDE_EXCLUDE_VIA == "cleaning_flag":
+        # Приводим к тем же значениям, которые отчёт ждёт от справочника,
+        # чтобы фильтр в ноутбуке остался прежним.
+        columns.append(("if(cleaning_flag = 1, 'include', '!exclude')", "include_exclude"))
+
+    return tuple(columns)
+
+
+#: Поля, по которым отчёт отбирает строки (normalizer). Если поля нет в
+#: выгрузке, соответствующий фильтр не применяется, и в отчёт попадает лишнее.
+REPORT_FILTERS = ("include_exclude", "competitor", "advertiser_type", "retail_category")
+
+
+def unresolved_filters():
+    """Фильтры отбора, для которых в выгрузке не будет колонки.
+
+    Пусто — отбор полностью соответствует прежнему. Непусто — суммы станут
+    больше прежних ровно на те строки, которые эти фильтры отсекали.
+    """
+    if not DICTIONARY_FROM_DB:
+        return ()
+
+    available = {alias for _, alias in dictionary_columns()}
+    return tuple(name for name in REPORT_FILTERS if name not in available)
+
+
+def describe_classification():
+    """Человекочитаемая сводка: откуда берётся классификация и чего не хватает."""
+    if not DICTIONARY_FROM_DB:
+        return "Классификация: из Google-таблицы (DICTIONARY_SOURCE=sheet)."
+
+    lines = ["Классификация: из базы."]
+    for alias, column in CATEGORY_COLUMNS.items():
+        lines.append(f"  {alias:<16} -> {column or 'НЕ ЗАДАНО'}")
+
+    missing = unresolved_filters()
+    if missing:
+        lines.append("")
+        lines.append(f"  ФИЛЬТРЫ БЕЗ КОЛОНКИ: {', '.join(missing)}")
+        lines.append("  Эти фильтры не применятся, и суммы станут больше прежних.")
+        if "competitor" in missing:
+            lines.append("  competitor лежит под category_N — найти номер:")
+            lines.append("      python scripts/check_categories.py")
+            lines.append("  и прописать:  COMPETITOR_COLUMN=category_N")
+        if "include_exclude" in missing:
+            lines.append("  include_exclude в базе нет вовсе. Ближайшее — чистка")
+            lines.append("  на стороне базы:  INCLUDE_EXCLUDE_VIA=cleaning_flag")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +413,7 @@ def _cost_query(media_type, extra_columns=(), type_name="adTypeName"):
     """
     columns = [
         *extra_columns,
+        *dictionary_columns(),
         (f"lowerUTF8({KEY_COLUMN})", KEY_COLUMN),
         ("adId", "ad_id"),
         ("lowerUTF8(media_type_long)", "media_type"),
@@ -371,6 +480,7 @@ PRESS_SQL = _cost_query(
 def _rate_query(table, alias, where, metrics):
     """Общая часть запросов рейтингов: разрезы у нац и рег одинаковые."""
     columns = [
+        *dictionary_columns(),
         (f"lowerUTF8({KEY_COLUMN})", KEY_COLUMN),
         ("adId", "id"),
         ("researchDate", "date"),

@@ -229,3 +229,72 @@ def test_https_port_implies_secure():
 def test_outer_joins_keep_null_semantics():
     """Без join_use_nulls внешние JOIN отдают 0 вместо NULL, и суммы уезжают."""
     assert ClickHouseDatabase("h", "u").settings["join_use_nulls"] == 1
+
+
+# --- классификация из базы вместо справочника -------------------------------
+
+
+def test_classification_comes_from_the_database_by_default():
+    """Справочника нет: brand_main и прочее приходят колонками выгрузки."""
+    assert ch.DICTIONARY_FROM_DB is True
+
+    for name in EXPECTED_QUERIES:
+        text = getattr(ch, name)
+        for _, alias in ch.dictionary_columns():
+            assert alias in text, f"{name}: нет поля классификации {alias}"
+
+
+def test_category_columns_are_lowered():
+    """В базе значения прописными, отчёт сравнивает со строчными."""
+    for _, column in ch.CATEGORY_COLUMNS.items():
+        if not column:
+            continue
+        assert f"lowerUTF8({column})" in ch.TV_SQL
+
+
+def test_sheet_mode_puts_no_classification_in_the_query(monkeypatch):
+    """Откат на Google-таблицу — одна строка в .env, без правки кода."""
+    monkeypatch.setenv("DICTIONARY_SOURCE", "sheet")
+    module = importlib.reload(ch)
+    try:
+        assert module.DICTIONARY_FROM_DB is False
+        assert module.dictionary_columns() == ()
+        assert "brand_main" not in module.TV_SQL
+        # В режиме справочника нехватки фильтров нет: их приносит мёрж.
+        assert module.unresolved_filters() == ()
+    finally:
+        monkeypatch.delenv("DICTIONARY_SOURCE", raising=False)
+        importlib.reload(ch)
+
+
+def test_unresolved_filters_are_reported_not_silently_skipped():
+    """competitor и include_exclude пока не сопоставлены — это должно быть видно."""
+    missing = ch.unresolved_filters()
+    assert "competitor" in missing
+    assert "include_exclude" in missing
+
+    report = ch.describe_classification()
+    assert "ФИЛЬТРЫ БЕЗ КОЛОНКИ" in report
+    assert "check_categories.py" in report
+
+
+def test_resolving_the_columns_clears_the_warning(monkeypatch):
+    monkeypatch.setenv("COMPETITOR_COLUMN", "category_6")
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "cleaning_flag")
+    module = importlib.reload(ch)
+    try:
+        assert module.unresolved_filters() == ()
+        assert "lowerUTF8(category_6) AS competitor" in module.TV_SQL
+        # include_exclude приводится к тем же значениям, что ждёт ноутбук.
+        assert "'include'" in module.TV_SQL and "'!exclude'" in module.TV_SQL
+    finally:
+        monkeypatch.delenv("COMPETITOR_COLUMN", raising=False)
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
+
+
+def test_include_exclude_only_appears_when_asked_for():
+    """По умолчанию колонки нет — фильтр не подменяется молча чем-то похожим."""
+    assert ch.INCLUDE_EXCLUDE_VIA == ""
+    assert "include_exclude" not in ch.TV_SQL
+    assert "cleaning_flag" not in ch.TV_SQL

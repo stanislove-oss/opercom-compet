@@ -146,6 +146,34 @@ def _check_db_settings(engine: str) -> list[Check]:
     return checks
 
 
+def _check_classification() -> Check:
+    """Все ли фильтры отбора получат свою колонку.
+
+    Блокирующая проверка намеренно. Пропущенный фильтр не роняет сборку — он
+    молча пропускает в отчёт лишние строки, и цифры просто становятся больше
+    правды. В Jupyter это видно по выводу normalizer, а кнопку в вебе никто
+    не читает, поэтому здесь нужен запрет, а не предупреждение.
+    """
+    try:
+        from app.sql_dict_connection import describe_classification, unresolved_filters
+    except ImportError as error:  # pragma: no cover — набор запросов всегда на месте
+        return Check("Классификация", False, True, f"не читается: {error}")
+
+    missing = unresolved_filters()
+    if not missing:
+        return Check("Классификация", True, True, "все фильтры отбора получат колонку")
+
+    return Check(
+        name="Классификация",
+        ok=False,
+        blocking=True,
+        detail=(
+            f"фильтры без колонки: {', '.join(missing)} — они не применятся, "
+            f"и суммы станут больше прежних.\n" + describe_classification()
+        ),
+    )
+
+
 def _check_path(name: str, path: str | Path, *, blocking: bool, must_be_dir: bool) -> Check:
     candidate = Path(path)
     exists = candidate.is_dir() if must_be_dir else candidate.is_file()
@@ -199,6 +227,7 @@ def run_checks(settings: Settings) -> list[Check]:
         )
         checks.append(_check_db_client(engine))
         checks.extend(_check_db_settings(engine))
+        checks.append(_check_classification())
     else:
         checks.append(
             _check_path("Снимки данных (dummy_df)", settings.dummy_df_root, blocking=True, must_be_dir=True)
