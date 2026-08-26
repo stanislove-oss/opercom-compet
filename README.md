@@ -100,6 +100,22 @@ python scripts/compare_engines.py --old mssql --new clickhouse
 
 Схема боевой базы лежит в `reports/clickhouse_schema.md`.
 
+### Если не подключается
+
+```bash
+python -c "from functions.db import describe_environment as d; print(d())"
+python scripts/db_test.py
+```
+
+Ошибка подключения теперь называет причину в первой строке и отличает
+«до сервера не достучались» (`ConnectionFailed`) от «сервер ответил, но база
+не та». Это разные беды: в первом случае бесполезно перебирать имена баз,
+во втором — проверять адрес и пароль.
+
+Чаще всего дело в паре порт/протокол: **8123 — это HTTP** (`CLICKHOUSE_SECURE=false`),
+**8443 — HTTPS** (`CLICKHOUSE_SECURE=true`). Если сервер слушает только 8443,
+а в `.env` стоит 8123, подключения не будет.
+
 ---
 
 ## Что нужно от вас для интеграции

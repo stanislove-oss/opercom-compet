@@ -67,6 +67,27 @@ class DatabaseError(RuntimeError):
     """Ошибка подключения или запроса — с понятным текстом, а не трейсбеком драйвера."""
 
 
+class ConnectionFailed(DatabaseError):
+    """Подключиться не удалось вовсе — до запроса дело не дошло.
+
+    Отдельный тип нужен, чтобы отличать «не достучались до сервера» от
+    «сервер ответил, но запрос неверный». Снаружи это одна и та же беда только
+    на первый взгляд: в первом случае бесполезно править SQL и перебирать имена
+    баз, во втором — бесполезно проверять адрес и пароль.
+    """
+
+
+def one_line(value, limit=400):
+    """Схлопывает сообщение в одну строку.
+
+    Вызывающий код нередко показывает только первую строку ошибки (список
+    отвергнутых баз, строка лога, колонка таблицы). Если причина лежала на
+    третьей строке, она при этом молча пропадала — и оставалась заготовка
+    вроде «Запрос не выполнился», по которой понять нечего.
+    """
+    return " ".join(str(value).split())[:limit]
+
+
 #: Приметы, по которым видно, для какой базы написан запрос. Нужны, чтобы
 #: поймать самую обидную ошибку переезда: подключение к одной базе, а запрос
 #: для другой. Драйвер в этом случае ругается на конкретную функцию, и по его
@@ -182,13 +203,50 @@ class ClickHouseDatabase:
                 settings=self.settings,
             )
         except Exception as error:
-            raise DatabaseError(
+            raise ConnectionFailed(
                 f"Не удалось подключиться к ClickHouse "
                 f"{self.host}:{self.port} (secure={self.secure}, "
-                f"база {self.database!r}, пользователь {self.user!r}): {error}"
+                f"база {self.database!r}, пользователь {self.user!r}): "
+                f"{one_line(error)}"
+                + self._connection_hint(error)
             ) from error
 
         return self._client
+
+    def _connection_hint(self, error):
+        """Подсказка по тексту ошибки драйвера — что чаще всего её вызывает."""
+        text = str(error).lower()
+
+        if "certificate" in text or "ssl" in text or "tls" in text:
+            return (
+                "\n  Похоже на проверку сертификата. В корпоративной сети трафик идёт"
+                "\n  через прокси со своим корневым сертификатом. Поставь truststore"
+                "\n  (pip install truststore) и вызови truststore.inject_into_ssl(),"
+                "\n  либо разово отключи проверку: CLICKHOUSE_VERIFY=false"
+            )
+
+        if "timed out" in text or "timeout" in text:
+            return (
+                f"\n  Сервер не ответил за {self.connect_timeout} с. Проверь, что адрес"
+                "\n  и порт доступны из этой сети (VPN, файрвол)."
+            )
+
+        if "refused" in text or "connection" in text or "resolve" in text or "name" in text:
+            other_port = DEFAULT_HTTPS_PORT if not self.secure else DEFAULT_HTTP_PORT
+            return (
+                "\n  Проверь пару порт/протокол: 8123 — это HTTP (CLICKHOUSE_SECURE=false),"
+                "\n  8443 — HTTPS (CLICKHOUSE_SECURE=true). Сейчас указан порт"
+                f" {self.port}"
+                f"\n  и secure={self.secure}; если сервер слушает {other_port}, подключения не будет."
+            )
+
+        if "authentication" in text or "password" in text or "access denied" in text:
+            return (
+                f"\n  Сервер ответил, но не пустил пользователя {self.user!r}."
+                "\n  Проверь CLICKHOUSE_USER и CLICKHOUSE_PASSWORD."
+            )
+
+        return ""
 
     # -- запросы ------------------------------------------------------------
 
@@ -206,6 +264,11 @@ class ClickHouseDatabase:
             frame = self.client.query_df(
                 query, parameters=params, settings=settings
             )
+        except ConnectionFailed:
+            # Подключение не состоялось — до запроса дело не дошло, и точный
+            # текст у этой ошибки уже есть. Заворачивать её в «запрос не
+            # выполнился» значит подменить причину следствием.
+            raise
         except Exception as error:
             raise DatabaseError(self._explain(query, error)) from error
 
@@ -222,6 +285,11 @@ class ClickHouseDatabase:
         _check_dialect(query, self.engine)
         try:
             result = self.client.query(query, parameters=params, settings=settings)
+        except ConnectionFailed:
+            # Подключение не состоялось — до запроса дело не дошло, и точный
+            # текст у этой ошибки уже есть. Заворачивать её в «запрос не
+            # выполнился» значит подменить причину следствием.
+            raise
         except Exception as error:
             raise DatabaseError(self._explain(query, error)) from error
 
@@ -232,6 +300,11 @@ class ClickHouseDatabase:
         """Запрос без результата: INSERT, CREATE, ALTER."""
         try:
             return self.client.command(query, parameters=params)
+        except ConnectionFailed:
+            # Подключение не состоялось — до запроса дело не дошло, и точный
+            # текст у этой ошибки уже есть. Заворачивать её в «запрос не
+            # выполнился» значит подменить причину следствием.
+            raise
         except Exception as error:
             raise DatabaseError(self._explain(query, error)) from error
 
@@ -338,8 +411,9 @@ class ClickHouseDatabase:
         self.close()
 
     def _explain(self, query, error):
-        head = " ".join(str(query).split())[:200]
-        return f"Запрос к ClickHouse не выполнился.\n  SQL: {head}…\n  Ошибка: {error}"
+        """Причина — в ПЕРВОЙ строке: вызывающий код часто показывает только её."""
+        head = one_line(query, 200)
+        return f"Запрос к ClickHouse не выполнился: {one_line(error)}\n  SQL: {head}…"
 
 
 # ---------------------------------------------------------------------------
@@ -695,13 +769,29 @@ def connect_for_discovery(engine=None, profile=None, **overrides):
             # Ленивое подключение: пока не сделан запрос, ошибки не будет.
             db.execute("SELECT 1")
             return db, rejected
+        except ConnectionFailed as error:
+            # До сервера не достучались. Перебирать остальные имена баз
+            # бессмысленно: имя базы тут ни при чём, и три одинаковые строки
+            # в ответе только запутают.
+            db.close()
+            raise ConnectionFailed(
+                f"{error}\n"
+                f"  Имена баз ({', '.join(ordered)}) не проверялись: до сервера\n"
+                f"  не дошёл ни один запрос, дело не в имени базы.\n"
+                f"  Что видно в окружении:  python -c "
+                f"\"from functions.db import describe_environment as d; print(d())\"\n"
+                f"  Подробная диагностика:  python scripts/db_test.py"
+            ) from error
         except Exception as error:
-            rejected.append((name, str(error).split("\n")[0][:200]))
+            # Сервер ответил, но именно с этой базой не вышло — стоит
+            # попробовать следующее имя.
+            rejected.append((name, one_line(error, 300)))
             db.close()
 
     raise DatabaseError(
-        "Не удалось подключиться ни к одной базе.\n  "
+        "Сервер отвечает, но ни одна база не подошла.\n  "
         + "\n  ".join(f"{name}: {message}" for name, message in rejected)
+        + "\n  Какие базы вообще доступны:  python scripts/dump_schema.py --list"
     )
 
 

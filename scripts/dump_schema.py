@@ -56,7 +56,7 @@ def connect(args):
     об этом вслух, а не молча подсунуть не ту базу.
     """
     try:
-        from functions.db import connect_for_discovery
+        from functions.db import connect_for_discovery, one_line
         overrides = {
             key: value for key, value in
             dict(host=args.host, port=args.port, user=args.user,
@@ -114,10 +114,21 @@ def connect(args):
             client.command("SELECT 1")
             return Direct(client, name), rejected
         except Exception as error:
-            rejected.append((name, str(error).split("\n")[0][:200]))
+            rejected.append((name, one_line(error, 300)))
+
+    # Если все имена отвергнуты одним и тем же текстом, дело не в имени базы,
+    # а в подключении — и повторять один текст трижды только запутывает.
+    messages = {message for _, message in rejected}
+    if len(messages) == 1:
+        raise RuntimeError(
+            f"Не удалось подключиться к ClickHouse {args.host}:{port}: "
+            f"{messages.pop()}\n"
+            f"  Имена баз ({', '.join(name for name, _ in rejected)}) ни при чём:\n"
+            f"  до сервера не дошёл ни один запрос."
+        )
 
     raise RuntimeError(
-        "Не удалось подключиться ни к одной базе.\n  "
+        "Сервер отвечает, но ни одна база не подошла.\n  "
         + "\n  ".join(f"{name}: {message}" for name, message in rejected)
     )
 
