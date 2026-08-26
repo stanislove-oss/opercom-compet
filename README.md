@@ -379,18 +379,41 @@ Jupyter. При запуске из сервиса `opercom.notebook_runner` п�
 ## Запуск
 
 ```bash
-python -m venv .venv && . .venv/bin/activate   # Python >= 3.12
-pip install -r requirements-dev.txt
-cp .env.example .env                            # заполнить CLICKHOUSE_*
-
-python scripts/build_presentation.py --check    # проверка окружения
-python scripts/build_presentation.py --plan     # что будет исполнено
-python scripts/build_presentation.py            # боевая сборка
-python -m pytest tests/ -q                      # тесты (56 шт.)
+python -m venv .venv && . .venv/bin/activate   # Python >= 3.12, иначе не запустится
+pip install -r requirements.txt
+cp .env.example .env                            # заполнить CLICKHOUSE_HOST/USER/PASSWORD
 ```
 
-CLI идёт тем же путём, что и кнопка, — им удобно проверять пайплайн до появления
-интерфейса и запускать сборку по расписанию.
+Дальше по шагам — каждый следующий имеет смысл только если предыдущий зелёный:
+
+```bash
+python scripts/build_presentation.py --check    # 1. готово ли окружение
+python scripts/db_test.py                       # 2. база отвечает
+python scripts/verify_queries.py                # 3. запросы валидны (без сервера)
+python scripts/build_presentation.py            # 4. сборка
+```
+
+Готовый файл ляжет в `runs/<дата-время>/main_2_filled.pptx`; путь печатается
+в конце. Своё место — `-o ~/презентация.pptx`.
+
+Что понадобится помимо `.env`:
+
+| | зачем |
+|---|---|
+| доступ к ClickHouse | затраты, рейтинги, диджитал, классификация |
+| шара `OPERCOM_MMO_DATA_ROOT` | `top_advertisers_investments_2024*.xlsx` и `top_brands_nattv_2024*.xlsx` — в базу не переезжали |
+| `templates_pptx/*_named.pptx` | шаблон, лежит в репозитории |
+
+Шара диджитала больше не нужна: он приходит из базы, и проверка требует её
+только если включён запасной путь через `DIGITAL_XLSX`.
+
+Первый прогон разумнее сделать из CLI, а не из веб-интерфейса: видно ход по
+разделам ноутбука и вывод `normalizer` — сколько строк осталось после отбора.
+
+```bash
+python -m pytest tests/ -q                      # тесты (111 шт.)
+python scripts/build_presentation.py --plan     # что именно будет исполнено
+```
 
 ---
 

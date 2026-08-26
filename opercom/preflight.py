@@ -233,16 +233,50 @@ def run_checks(settings: Settings) -> list[Check]:
             _check_path("Снимки данных (dummy_df)", settings.dummy_df_root, blocking=True, must_be_dir=True)
         )
 
-    # Excel-файлы с сетевой шары читаются при любом источнике: это отдельная
-    # ветка пайплайна (top advertisers, top brands nattv, X5 digital).
+    # Excel с сетевой шары нужен при любом источнике: top_advertisers и
+    # top_brands_nattv в базу не переезжали.
     checks.append(
-        _check_path("Шара MMO (top advertisers, рейтинги)", settings.mmo_data_root, blocking=True, must_be_dir=True)
+        _check_path("Шара MMO (top advertisers, рейтинги)", settings.mmo_data_root,
+                    blocking=True, must_be_dir=True)
     )
-    checks.append(
-        _check_path("Шара digital (X5 DigitalInvestments)", settings.digital_data_root, blocking=True, must_be_dir=True)
-    )
+    checks.append(_check_digital_source(settings))
 
     return checks
+
+
+def _digital_from_database() -> bool:
+    """Придёт ли диджитал из базы. Решает то же, что и ноутбук.
+
+    Ноутбук смотрит на набор запросов, а не на DB_ENGINE, — здесь так же,
+    иначе проверка и прогон разошлись бы в понимании того, что нужно.
+    """
+    if os.getenv("DIGITAL_XLSX", "").strip():
+        return False
+    try:
+        from app.queries import queries_for
+
+        return "DIGITAL_SQL" in queries_for(_db_engine()).names
+    except Exception:  # noqa: BLE001 - набор запросов не обязан быть импортируемым
+        return False
+
+
+def _check_digital_source(settings: Settings) -> Check:
+    """Диджитал: из базы или из Excel — и требовать надо только то, что нужно.
+
+    Раньше шара проверялась всегда и блокировала запуск. После переезда
+    диджитала в ClickHouse она нужна только для запасного пути, и блокировать
+    прогон из-за недоступной шары, к которой никто не пойдёт, — значит
+    не пускать на ровном месте.
+    """
+    if _digital_from_database():
+        return Check("Диджитал", True, True, "из базы (other_media_x5_v1)")
+
+    explicit = os.getenv("DIGITAL_XLSX", "").strip()
+    if explicit:
+        return _check_path("Диджитал (файл)", explicit, blocking=True, must_be_dir=False)
+
+    return _check_path("Диджитал (шара X5_DigitalInvestments)", settings.digital_data_root,
+                       blocking=True, must_be_dir=True)
 
 
 def is_ready(checks: list[Check]) -> bool:

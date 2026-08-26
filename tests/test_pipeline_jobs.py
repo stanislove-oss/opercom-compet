@@ -180,3 +180,31 @@ def test_log_offset_returns_only_the_tail(settings, green_preflight):
 
     assert len(tail["log"]) == 1
     assert tail["log"][0] == full["log"][-1]
+
+
+# --- проверка готовности: требуем только то, что действительно нужно --------
+
+
+def test_digital_share_is_not_required_when_digital_comes_from_the_database(monkeypatch):
+    """Шара нужна только запасному пути. Блокировать из-за неё — не пускать зря."""
+    from opercom import preflight
+
+    monkeypatch.delenv("DIGITAL_XLSX", raising=False)
+    settings = Settings(digital_data_root=Path("/нет/такой/шары"))
+
+    check = preflight._check_digital_source(settings)
+
+    assert check.ok is True
+    assert "из базы" in check.detail
+
+
+def test_digital_share_is_required_when_the_workbook_path_is_used(monkeypatch, tmp_path):
+    from opercom import preflight
+
+    missing = tmp_path / "нет-файла.xlsx"
+    monkeypatch.setenv("DIGITAL_XLSX", str(missing))
+
+    check = preflight._check_digital_source(Settings())
+
+    assert check.ok is False
+    assert check.blocking is True
