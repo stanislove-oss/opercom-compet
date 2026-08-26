@@ -184,16 +184,39 @@ CATEGORY_COLUMNS = {
     "competitor": _env("COMPETITOR_COLUMN", "category_1"),
 }
 
-#: Чего в базе нет вовсе — ни колонкой, ни в представлениях: include_exclude.
-#: В отчёте по нему стоял фильтр `== 'include'` — ручные исключения из
-#: Google-таблицы. Заменить его нечем, кроме чистки на стороне базы:
-#:     INCLUDE_EXCLUDE_VIA=cleaning_flag   строки с cleaning_flag = 1 считаем include
-#:     INCLUDE_EXCLUDE_VIA=               (по умолчанию) фильтра нет вовсе
+#: include_exclude. В отчёте по нему стоял фильтр `== 'include'` — ручные
+#: исключения из Google-таблицы. Три варианта:
 #:
-#: Без фильтра суммы станут больше прежних — ровно на те строки, которые
-#: раньше вычёркивали руками. Насколько именно, покажет сверка:
-#:     python scripts/compare_engines.py --queries TV_SQL
-INCLUDE_EXCLUDE_VIA = _env("INCLUDE_EXCLUDE_VIA", "").strip().lower()
+#:     INCLUDE_EXCLUDE_VIA=cleaning_flag   чистка на стороне базы (по умолчанию)
+#:     INCLUDE_EXCLUDE_VIA=column          настоящая колонка, см. ниже
+#:     INCLUDE_EXCLUDE_VIA=                фильтра нет вовсе
+#:
+#: ВАЖНО. В таблицах, которые читает отчёт (media_costs_union, nat_tv, big_tv,
+#: reg_tv), колонки include_exclude нет. Но она есть в соседней базе, в
+#: other_media_x5_v1.radio_dss_x5_v1 — то есть поле в хранилище живёт, просто
+#: не в наших таблицах. Схема mediascope_x5_big_v23 при этом ещё не снята,
+#: а затраты берутся именно оттуда. Прежде чем довольствоваться заменителем,
+#: имеет смысл посмотреть, нет ли там настоящей колонки:
+#:     python scripts/dump_schema.py --database mediascope_x5_big_v23
+#: Если найдётся — INCLUDE_EXCLUDE_VIA=column и INCLUDE_EXCLUDE_COLUMN=имя.
+INCLUDE_EXCLUDE_VIA = _env("INCLUDE_EXCLUDE_VIA", "cleaning_flag").strip().lower()
+
+#: Имя настоящей колонки, если она найдётся. Значения приводятся к нижнему
+#: регистру и передаются как есть: в базе пишут EXCLUDE, в справочнике писали
+#: !exclude, и оба варианта фильтр `== 'include'` отсекает одинаково.
+#: Придумывать своё отображение значений нельзя — оно молча поменяло бы отбор.
+INCLUDE_EXCLUDE_COLUMN = _env("INCLUDE_EXCLUDE_COLUMN", "include_exclude")
+
+#: Что считать «включено» при INCLUDE_EXCLUDE_VIA=cleaning_flag.
+#:
+#: Это ДОГАДКА, а не установленный факт, и потому вынесена в настройку.
+#: Единственное наблюдение: в radio_dss_x5_v1 строки с cleaning_flag = 2
+#: помечены include_exclude = EXCLUDE. То есть флаг не двоичный (не 0/1),
+#: и что означают остальные значения — неизвестно.
+#:
+#: Сколько строк и денег отсекает это условие на нашей выборке:
+#:     python scripts/check_filters.py
+CLEANING_FLAG_INCLUDE = _env("CLEANING_FLAG_INCLUDE", "cleaning_flag = 1")
 
 
 def dictionary_columns():
@@ -213,7 +236,11 @@ def dictionary_columns():
     if INCLUDE_EXCLUDE_VIA == "cleaning_flag":
         # Приводим к тем же значениям, которые отчёт ждёт от справочника,
         # чтобы фильтр в ноутбуке остался прежним.
-        columns.append(("if(cleaning_flag = 1, 'include', '!exclude')", "include_exclude"))
+        columns.append(
+            (f"if({CLEANING_FLAG_INCLUDE}, 'include', '!exclude')", "include_exclude"))
+    elif INCLUDE_EXCLUDE_VIA == "column":
+        columns.append(
+            (f"lowerUTF8(ifNull({INCLUDE_EXCLUDE_COLUMN}, ''))", "include_exclude"))
 
     return tuple(columns)
 
@@ -245,6 +272,11 @@ def describe_classification():
     for alias, column in CATEGORY_COLUMNS.items():
         lines.append(f"  {alias:<16} -> {column or 'НЕ ЗАДАНО'}")
 
+    if INCLUDE_EXCLUDE_VIA == "cleaning_flag":
+        lines.append(f"  include_exclude   -> {CLEANING_FLAG_INCLUDE} (ДОГАДКА)")
+    elif INCLUDE_EXCLUDE_VIA == "column":
+        lines.append(f"  include_exclude   -> {INCLUDE_EXCLUDE_COLUMN}")
+
     missing = unresolved_filters()
     if missing:
         lines.append("")
@@ -255,8 +287,17 @@ def describe_classification():
             lines.append("      python scripts/check_categories.py")
             lines.append("  и прописать:  COMPETITOR_COLUMN=category_N")
         if "include_exclude" in missing:
-            lines.append("  include_exclude в базе нет вовсе. Ближайшее — чистка")
-            lines.append("  на стороне базы:  INCLUDE_EXCLUDE_VIA=cleaning_flag")
+            lines.append("  include_exclude: INCLUDE_EXCLUDE_VIA=cleaning_flag")
+            lines.append("  или =column, если найдётся настоящая колонка.")
+
+    if INCLUDE_EXCLUDE_VIA == "cleaning_flag":
+        lines.append("")
+        lines.append("  include_exclude закрыт заменителем, а не настоящей колонкой.")
+        lines.append("  cleaning_flag не двоичный: в radio_dss_x5_v1 встречается 2,")
+        lines.append("  и что означают остальные значения — неизвестно. Проверить,")
+        lines.append("  сколько режет условие:  python scripts/check_filters.py")
+        lines.append("  Настоящая колонка может найтись в витрине затрат:")
+        lines.append("      python scripts/dump_schema.py --database mediascope_x5_big_v23")
 
     return "\n".join(lines)
 

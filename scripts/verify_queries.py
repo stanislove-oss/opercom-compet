@@ -93,6 +93,44 @@ def schema_database(path):
     return found.group(1) if found else DATABASE
 
 
+#: Обёртки, которые ничего не говорят о том, что писать в строку-заглушку.
+TYPE_WRAPPERS = ("Nullable(", "LowCardinality(")
+
+
+def base_type(type_):
+    """Снимает обёртки: Nullable(LowCardinality(String)) -> String."""
+    type_ = type_.strip()
+    changed = True
+    while changed:
+        changed = False
+        for wrapper in TYPE_WRAPPERS:
+            if type_.startswith(wrapper) and type_.endswith(")"):
+                type_ = type_[len(wrapper):-1].strip()
+                changed = True
+    return type_
+
+
+def sample_value(type_):
+    """Значение-заглушка под тип колонки.
+
+    Разбор по типу, а не по префиксу имени: в снятых схемах встречаются
+    Nullable(Int32), LowCardinality(String), Decimal(20, 8) и DateTime,
+    и пустая строка в любой из них роняет INSERT целиком — вместе со всей
+    проверкой.
+    """
+    plain = base_type(type_)
+
+    if plain.startswith(("Int", "UInt")):
+        return "1"
+    if plain.startswith(("Float", "Decimal")):
+        return "1"
+    if plain.startswith("DateTime"):
+        return "'2025-05-01 00:00:00'"
+    if plain.startswith("Date"):
+        return "'2025-05-01'"
+    return "''"
+
+
 def create_schema(session, database, tables):
     """Создаёт базу под её настоящим именем — так работают имена с точкой.
 
@@ -108,16 +146,8 @@ def create_schema(session, database, tables):
         body = ", ".join(f"`{column}` {type_}" for column, type_ in columns)
         session.query(f"CREATE TABLE `{database}`.`{name}` ({body}) ENGINE = Memory")
 
-        values = []
-        for column, type_ in columns:
-            if column in SAMPLE_VALUES:
-                values.append(SAMPLE_VALUES[column])
-            elif type_.startswith(("Int", "UInt", "Float")):
-                values.append("1")
-            elif type_ == "Date":
-                values.append("'2025-05-01'")
-            else:
-                values.append("''")
+        values = [SAMPLE_VALUES.get(column) or sample_value(type_)
+                  for column, type_ in columns]
         session.query(
             f"INSERT INTO `{database}`.`{name}` VALUES ({', '.join(values)})")
 

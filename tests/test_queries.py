@@ -152,14 +152,19 @@ def test_join_key_comes_from_the_database():
         assert ch.KEY_COLUMN in getattr(ch, name), f"{name}: нет {ch.KEY_COLUMN}"
 
 
-def test_no_filters_beyond_what_the_old_queries_had():
-    """Переезд не должен менять цифры сам по себе: лишних фильтров нет."""
+def test_no_where_filters_beyond_what_the_old_queries_had():
+    """Переезд не должен менять цифры сам по себе: лишних фильтров в WHERE нет.
+
+    cleaning_flag при этом может встречаться в SELECT — там он не отсекает
+    строки, а восстанавливает include_exclude, то есть воспроизводит фильтр,
+    который был и раньше. Отбор по нему делает уже ноутбук.
+    """
     assert ch.ESTAT_FILTER == ""
     assert ch.CLEANING_FILTER == ""
     for name in EXPECTED_QUERIES:
-        text = getattr(ch, name)
-        assert "estat" not in text, f"{name}: фильтр estat включён по умолчанию"
-        assert "cleaning_flag" not in text, f"{name}: фильтр cleaning_flag включён"
+        where = getattr(ch, name).split("WHERE", 1)[-1].split("GROUP BY", 1)[0]
+        assert "estat" not in where, f"{name}: фильтр estat в WHERE"
+        assert "cleaning_flag" not in where, f"{name}: фильтр cleaning_flag в WHERE"
 
 
 def test_estat_filter_only_reaches_the_table_that_has_the_column(monkeypatch):
@@ -289,13 +294,18 @@ def test_competitor_is_resolved_from_the_view_definition():
     assert "competitor" not in ch.unresolved_filters()
 
 
-def test_include_exclude_is_still_reported_as_missing():
-    """Его в базе нет вовсе — и это должно быть видно, а не молча пропущено."""
-    assert ch.unresolved_filters() == ("include_exclude",)
-
-    report = ch.describe_classification()
-    assert "ФИЛЬТРЫ БЕЗ КОЛОНКИ" in report
-    assert "cleaning_flag" in report
+def test_missing_filter_is_reported_not_silently_skipped(monkeypatch):
+    """Непримененный фильтр не роняет прогон — он молча завышает суммы."""
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "none")
+    module = importlib.reload(ch)
+    try:
+        assert module.unresolved_filters() == ("include_exclude",)
+        report = module.describe_classification()
+        assert "ФИЛЬТРЫ БЕЗ КОЛОНКИ" in report
+        assert "суммы станут больше" in report
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
 
 
 def test_resolving_the_columns_clears_the_warning(monkeypatch):
@@ -313,8 +323,95 @@ def test_resolving_the_columns_clears_the_warning(monkeypatch):
         importlib.reload(ch)
 
 
-def test_include_exclude_only_appears_when_asked_for():
-    """По умолчанию колонки нет — фильтр не подменяется молча чем-то похожим."""
-    assert ch.INCLUDE_EXCLUDE_VIA == ""
-    assert "include_exclude" not in ch.TV_SQL
-    assert "cleaning_flag" not in ch.TV_SQL
+def test_include_exclude_reaches_costs_and_ratings_alike():
+    """Отбор одинаков для всех источников — иначе слайды считались бы по-разному."""
+    for name in EXPECTED_QUERIES:
+        assert "include_exclude" in getattr(ch, name), name
+
+
+# --- include_exclude: заменитель вместо настоящей колонки -------------------
+
+
+def test_include_exclude_uses_cleaning_flag_by_default():
+    """Колонки нет в наших таблицах, поэтому её заменяет чистка на стороне базы."""
+    assert ch.INCLUDE_EXCLUDE_VIA == "cleaning_flag"
+    assert ch.unresolved_filters() == ()
+
+    # Значения те же, что ждёт фильтр в ноутбуке: `== 'include'`.
+    assert f"if({ch.CLEANING_FLAG_INCLUDE}, 'include', '!exclude') AS include_exclude" in ch.TV_SQL
+
+
+def test_the_guess_is_visible_not_silent():
+    """Заменитель — это догадка, и она не должна выглядеть решённым вопросом."""
+    report = ch.describe_classification()
+    assert "ДОГАДКА" in report
+    assert "не двоичный" in report
+    # Подсказка, где искать настоящую колонку.
+    assert "dump_schema.py --database mediascope_x5_big_v23" in report
+
+
+def test_cleaning_flag_condition_is_configurable(monkeypatch):
+    """Флаг не 0/1: в radio_dss_x5_v1 встречается 2, поэтому условие — настройка."""
+    monkeypatch.setenv("CLEANING_FLAG_INCLUDE", "cleaning_flag IN (1, 2)")
+    module = importlib.reload(ch)
+    try:
+        assert "if(cleaning_flag IN (1, 2), 'include', '!exclude')" in module.TV_SQL
+    finally:
+        monkeypatch.delenv("CLEANING_FLAG_INCLUDE", raising=False)
+        importlib.reload(ch)
+
+
+def test_real_column_is_passed_through_without_invented_mapping(monkeypatch):
+    """Если колонка найдётся: только нижний регистр, никаких своих отображений.
+
+    В базе пишут EXCLUDE, в справочнике писали !exclude — фильтр `== 'include'`
+    отсекает оба одинаково. Придумывать перевод значений значило бы молча
+    поменять отбор.
+    """
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "column")
+    module = importlib.reload(ch)
+    try:
+        assert "lowerUTF8(ifNull(include_exclude, '')) AS include_exclude" in module.TV_SQL
+        assert "'!exclude'" not in module.TV_SQL
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
+
+
+def test_filter_can_still_be_turned_off_entirely(monkeypatch):
+    monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "")
+    module = importlib.reload(ch)
+    try:
+        # Пустое значение подхватывает умолчание, поэтому выключаем явным словом.
+        monkeypatch.setenv("INCLUDE_EXCLUDE_VIA", "none")
+        module = importlib.reload(ch)
+        assert "include_exclude" not in module.TV_SQL
+        assert module.unresolved_filters() == ("include_exclude",)
+    finally:
+        monkeypatch.delenv("INCLUDE_EXCLUDE_VIA", raising=False)
+        importlib.reload(ch)
+
+
+# --- диджитал ---------------------------------------------------------------
+
+
+def test_digital_asks_only_for_what_the_report_reads():
+    """Каждая лишняя колонка — лишний шанс не совпасть с названием в базе."""
+    for alias in ("brand_main", "advertiser_main", "delivery", "year", "month",
+                  "cost_rub_disc"):
+        assert alias in ch.DIGITAL_SQL, alias
+
+    # Этого отчёт не читает, и тащить их незачем.
+    for unused in ("site", "marketing_channel", "quarter", "coef", "brand_segment"):
+        assert unused not in ch.DIGITAL_SQL, unused
+
+
+def test_digital_delivery_never_comes_back_null():
+    """groupby в pandas выбрасывает строки с NaN в ключе — часть данных пропала бы."""
+    assert "ifNull(d.delivery, '')" in ch.DIGITAL_SQL
+
+
+def test_digital_takes_the_usable_cost_column():
+    """Колонок затрат две; вторая называется cost_NOT_FOR_USE."""
+    assert "SUM(d.cost_estimated) AS cost_rub_disc" in ch.DIGITAL_SQL
+    assert "cost_NOT_FOR_USE" not in ch.DIGITAL_SQL
